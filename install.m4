@@ -587,12 +587,81 @@ install_podman() {
 			# app-containers/podman includes all necessary dependencies
 			# Note: Gentoo's podman package handles Docker compatibility automatically
 			log "Installing Podman for Gentoo via emerge"
-			sudo emerge --ask=n app-containers/podman
+
+			# Gentoo Package Masking Issue:
+			# Podman and many of its dependencies are often keyword-masked (~amd64)
+			# on Gentoo, meaning they're marked as testing/unstable packages.
+			# This is common for rapidly-evolving container technologies.
+			#
+			# We need to unmask these packages before installation by adding them
+			# to /etc/portage/package.accept_keywords/
+			#
+			# Common podman dependencies that need unmasking:
+			# - app-containers/podman (the main package)
+			# - app-containers/netavark (network stack)
+			# - app-containers/aardvark-dns (DNS for containers)
+			# - app-containers/catatonit (init for containers)
+			# - net-firewall/iptables (if masked)
+			# - sys-apps/fuse-overlayfs (overlay filesystem support)
+
+			log "Configuring package keywords for Podman and dependencies"
+
+			# Create package.accept_keywords directory if it doesn't exist
+			# This directory holds per-package keyword overrides
+			sudo mkdir -p /etc/portage/package.accept_keywords
+
+			# Create a dedicated file for Tenstorrent-related package keywords
+			# Using a separate file makes it easy to track what we've changed
+			# and allows for easy removal later if needed
+			sudo tee /etc/portage/package.accept_keywords/tenstorrent-podman > /dev/null << 'EOF'
+# Tenstorrent installer: Podman and dependencies
+# These packages are required for tt-metalium container support
+# Keyword acceptance (~amd64) allows installation of testing packages
+
+# Main podman package
+app-containers/podman ~amd64
+
+# Container networking stack
+app-containers/netavark ~amd64
+app-containers/aardvark-dns ~amd64
+
+# Container init system
+app-containers/catatonit ~amd64
+
+# Overlay filesystem support for container storage
+sys-apps/fuse-overlayfs ~amd64
+
+# Container runtime dependencies
+app-containers/containers-common ~amd64
+app-containers/containers-image ~amd64
+app-containers/containers-storage ~amd64
+
+# Networking dependencies
+net-firewall/iptables ~amd64
+sys-apps/iproute2 ~amd64
+
+# Common Go dependencies that podman needs
+dev-go/go-md2man ~amd64
+EOF
+
+			log "Package keywords configured, proceeding with installation"
+			log "Note: This may take a while as Gentoo builds from source"
+
+			# Now install podman with all dependencies unmasked
+			# --ask=n suppresses interactive prompts
+			# --verbose shows what's being installed
+			# --autounmask-continue automatically handles any additional unmasking needed
+			sudo emerge --ask=n --verbose --autounmask-continue app-containers/podman || {
+				error "Podman installation failed"
+				error "You may need to manually unmask additional packages"
+				error "Check: emerge -pv app-containers/podman"
+				return 1
+			}
 
 			# Gentoo's podman package may require additional post-install configuration
 			# The package should handle most configuration automatically, but we log
 			# a message in case users need to perform additional setup
-			log "Podman installed via portage"
+			log "Podman installed successfully via portage"
 			log "Note: If you encounter issues with rootless podman, check /etc/subuid and /etc/subgid"
 			;;
 		*)
@@ -1358,16 +1427,36 @@ main() {
 			#       Users should sync their portage tree before running this installer if needed.
 			log "Installing base packages for Gentoo Linux via emerge (portage)"
 
+			# Gentoo Package Masking Note:
+			# Most of these base packages (git, jq, dkms, etc.) are typically stable
+			# and don't require keyword unmasking. However, on some Gentoo profiles
+			# or configurations, certain packages might be masked.
+			#
+			# The --autounmask-continue flag will automatically handle any masking
+			# issues by writing appropriate entries to package.accept_keywords
+			# and continuing with the installation.
+			#
+			# If you encounter masking issues, you can also manually unmask packages:
+			#   echo "category/package ~amd64" | sudo tee -a /etc/portage/package.accept_keywords/tenstorrent
+
 			# Install all required dependencies in one emerge command
 			# This is more efficient than multiple emerge calls
-			sudo emerge --ask=n --verbose \
+			# --autounmask-continue: automatically handle keyword masking if needed
+			# --verbose: show detailed output of what's being installed
+			sudo emerge --ask=n --verbose --autounmask-continue \
 				dev-vcs/git \
 				dev-python/pip \
 				sys-kernel/dkms \
 				dev-lang/rust \
 				dev-python/pipx \
 				app-misc/jq \
-				dev-libs/protobuf
+				dev-libs/protobuf || {
+				error "Failed to install base packages"
+				error "Some packages may be masked. Try:"
+				error "  emerge -pv <package-name>  # to see what's needed"
+				error "Or manually accept keywords in /etc/portage/package.accept_keywords/"
+				exit 1
+			}
 
 			# Set kernel listing command for Gentoo
 			# Gentoo typically has kernel sources in /lib/modules

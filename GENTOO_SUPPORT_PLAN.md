@@ -507,10 +507,66 @@ Consider submitting ebuilds to [GURU](https://wiki.gentoo.org/wiki/Project:GURU)
 - **OpenRC**: Manual configuration fallback (HugePages via /etc/fstab)
 - Consider creating proper OpenRC init scripts for production use
 
-### Package Availability
+### Package Availability & Masking
+
+#### Overview
 - Most dependencies available in main portage tree
 - SFPI may need source build if no Gentoo package exists
-- Some users may have `~amd64` packages masked (needs `package.accept_keywords`)
+- **Package masking is common** for rapidly-evolving packages like Podman
+
+#### Package Masking Issue (RESOLVED)
+
+Many packages in the Tenstorrent stack, particularly container-related packages, are keyword-masked (~amd64) on Gentoo. This means they're marked as testing/unstable packages and won't install without explicit permission.
+
+**Common masked packages:**
+- `app-containers/podman` - Main container runtime
+- `app-containers/netavark` - Container networking
+- `app-containers/aardvark-dns` - DNS for containers
+- `app-containers/catatonit` - Container init
+- `net-firewall/iptables` - Firewall (sometimes)
+- `sys-apps/fuse-overlayfs` - Overlay filesystem
+
+#### Solution Implemented
+
+The installer now automatically handles package masking in two ways:
+
+1. **For Podman** (lines 585-666 in install.m4):
+   - Creates `/etc/portage/package.accept_keywords/tenstorrent-podman`
+   - Lists all podman dependencies with `~amd64` keyword
+   - Uses `--autounmask-continue` flag for automatic handling
+
+2. **For Base Packages** (lines 1423-1466 in install.m4):
+   - Uses `--autounmask-continue` flag on all emerge commands
+   - Automatically accepts keywords if needed
+   - Provides helpful error messages if masking issues occur
+
+#### Manual Unmasking (If Needed)
+
+If you encounter masked packages that aren't automatically handled:
+
+```bash
+# Check what's masked
+emerge -pv app-containers/podman
+
+# Manually unmask a package
+echo "app-containers/podman ~amd64" | sudo tee -a /etc/portage/package.accept_keywords/tenstorrent
+
+# Or use a directory structure
+sudo mkdir -p /etc/portage/package.accept_keywords
+echo "app-containers/podman ~amd64" | sudo tee /etc/portage/package.accept_keywords/podman
+```
+
+#### Files Created by Installer
+
+The installer creates this file with all necessary keywords:
+```
+/etc/portage/package.accept_keywords/tenstorrent-podman
+```
+
+This file can be safely removed after installation if you want to revert the changes:
+```bash
+sudo rm /etc/portage/package.accept_keywords/tenstorrent-podman
+```
 
 ### Kernel Considerations
 - Gentoo users may run custom kernels

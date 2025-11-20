@@ -79,6 +79,7 @@ For more information, please see this compatibility matrix:
 | Debian | 12.10.0     | Yes      | - Curl is not installed by default<br>- The packaged rustc version is too old to complete installation, we recommend using [rustup](https://rustup.rs/) to install a more modern version|
 | Fedora | 41          | Yes      | May require restart after base package install |
 | Fedora | 42          | Yes      | May require restart after base package install |
+| Gentoo | Latest (rolling) | Beta  | - DKMS-based kernel module installation<br>- May require `emerge --sync` before installation<br>- Supports both systemd and OpenRC init systems<br>- SFPI and tt-system-tools built from source<br>- Recommended to use pipx or venv for Python packages |
 | Other DEB-based distros  | N/A          | N/A     | Unsupported but may work |
 | Other RPM-based distros  | N/A          | N/A     | Unsupported but may work |
 

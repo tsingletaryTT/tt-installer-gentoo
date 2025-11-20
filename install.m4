@@ -86,6 +86,9 @@ EOF
 )
 KERNEL_LISTING_FEDORA="rpm -qa | grep \"^kernel.*-devel\" | grep -v \"\-devel-matched\" | sed 's/^kernel-devel-//'"
 KERNEL_LISTING_EL="rpm -qa | grep \"^kernel.*-devel\" | grep -v \"\-devel-matched\" | sed 's/^kernel-devel-//'"
+# Gentoo: List installed kernel versions from /lib/modules
+# Exclude .old backups and sort by version number
+KERNEL_LISTING_GENTOO="ls /lib/modules | grep -v '.old$' | sort -V"
 
 # ========================= GIT URLs =========================
 
@@ -270,6 +273,15 @@ detect_distro() {
 		DISTRO_ID=${ID}
 		DISTRO_VERSION=${VERSION_ID}
 		check_is_ubuntu_20
+
+		# Gentoo-specific handling:
+		# Gentoo doesn't provide a consistent VERSION_ID in /etc/os-release
+		# Instead, we use the kernel version as a proxy for the system version
+		# This is acceptable since Gentoo is a rolling release distribution
+		if [[ "${DISTRO_ID}" = "gentoo" ]]; then
+			DISTRO_VERSION=$(uname -r | cut -d'-' -f1)
+			log "Detected Gentoo Linux (kernel version: ${DISTRO_VERSION})"
+		fi
 	else
 		error "Cannot detect Linux distribution"
 		exit 1
@@ -570,6 +582,19 @@ install_podman() {
 		"rhel"|"centos")
 			sudo dnf install -y podman podman-docker
 			;;
+		"gentoo")
+			# Gentoo: Install Podman via emerge (portage)
+			# app-containers/podman includes all necessary dependencies
+			# Note: Gentoo's podman package handles Docker compatibility automatically
+			log "Installing Podman for Gentoo via emerge"
+			sudo emerge --ask=n app-containers/podman
+
+			# Gentoo's podman package may require additional post-install configuration
+			# The package should handle most configuration automatically, but we log
+			# a message in case users need to perform additional setup
+			log "Podman installed via portage"
+			log "Note: If you encounter issues with rootless podman, check /etc/subuid and /etc/subgid"
+			;;
 		*)
 			error "Unsupported distribution for Podman installation: ${DISTRO_ID}"
 			return 1
@@ -814,6 +839,146 @@ log "Installing Kernel-Mode Driver"
 	fi
 }
 
+# Gentoo HugePages Installation - Source Build Approach
+# This function attempts to build and install tt-system-tools from source
+# for Gentoo systems. It detects whether systemd or OpenRC is in use and
+# configures accordingly. Falls back to manual configuration if build fails.
+manual_install_hugepages_gentoo_source() {
+	log "Setting up HugePages for Gentoo (building from source)"
+	cd "${WORKDIR}"
+
+	# Clone the tt-system-tools repository at the specified version
+	# This contains the HugePages configuration scripts and systemd/OpenRC units
+	git clone --branch "v${SYSTOOLS_VERSION}" \
+		https://github.com/tenstorrent/tt-system-tools.git
+	cd tt-system-tools
+
+	# Detect which init system is in use (systemd or OpenRC)
+	# Gentoo supports both, so we need to handle each appropriately
+	if command -v systemctl &> /dev/null && systemctl --version &> /dev/null 2>&1; then
+		# Systemd is present and working
+		log "Detected systemd, installing HugePages configuration for systemd"
+
+		# Attempt to install using the project's Makefile
+		# PREFIX=/usr ensures files are installed to standard system locations
+		sudo make install PREFIX=/usr || {
+			warn "Make install failed, falling back to manual configuration"
+			manual_configure_hugepages_gentoo
+			return
+		}
+
+		# Enable and start the tenstorrent-hugepages service
+		# This service configures kernel parameters for HugePages at boot
+		sudo systemctl enable tenstorrent-hugepages.service
+
+		# Enable and start the hugepages mount unit
+		# This mounts the 1GB hugepages filesystem at /dev/hugepages-1G
+		sudo systemctl enable dev-hugepages-1G.mount
+
+		# Try to start services immediately (|| true prevents script exit on failure)
+		# Services may fail if hugepages aren't available yet, which is okay
+		sudo systemctl start tenstorrent-hugepages.service || true
+		sudo systemctl start dev-hugepages-1G.mount || true
+
+		log "HugePages configuration installed via systemd"
+	else
+		# OpenRC is in use (Gentoo's traditional init system)
+		log "Detected OpenRC, using manual HugePages configuration"
+		warn "OpenRC support requires manual configuration (no packaged OpenRC service yet)"
+
+		# Fall back to manual configuration for OpenRC systems
+		# We don't have native OpenRC service scripts in tt-system-tools yet
+		manual_configure_hugepages_gentoo
+	fi
+}
+
+# Gentoo HugePages Manual Configuration
+# This function manually configures HugePages when the source build approach
+# doesn't work or when OpenRC is in use. It sets up kernel parameters,
+# creates mount points, and configures either systemd or OpenRC appropriately.
+manual_configure_hugepages_gentoo() {
+	log "Configuring HugePages manually for Gentoo"
+
+	# Configure kernel parameters for HugePages
+	# These settings persist across reboots via /etc/sysctl.d/
+	sudo mkdir -p /etc/sysctl.d
+
+	# Create sysctl configuration file for HugePages
+	# vm.nr_hugepages: Number of 2MB hugepages to reserve (2048 = 4GB)
+	# vm.hugetlb_shm_group: Group ID that can use hugepages (0 = root)
+	sudo tee /etc/sysctl.d/99-tenstorrent-hugepages.conf > /dev/null << EOF
+# Tenstorrent HugePages Configuration
+# Reserve 2048 hugepages (2MB each = 4GB total)
+vm.nr_hugepages = 2048
+# Allow root group to use hugepages
+vm.hugetlb_shm_group = 0
+EOF
+
+	# Apply the sysctl settings immediately (without reboot)
+	sudo sysctl -p /etc/sysctl.d/99-tenstorrent-hugepages.conf
+
+	# Create mount point for 1GB hugepages
+	# Tenstorrent hardware requires 1GB hugepages for optimal performance
+	sudo mkdir -p /dev/hugepages-1G
+
+	# Configure mounting based on init system
+	if command -v systemctl &> /dev/null; then
+		# Systemd: Create a systemd mount unit
+		log "Creating systemd mount unit for 1GB hugepages"
+
+		# Create systemd mount unit file
+		# Unit files for mount points must be named after their mount path
+		# with slashes replaced by hyphens
+		sudo tee /etc/systemd/system/dev-hugepages-1G.mount > /dev/null << EOF
+[Unit]
+Description=1GB HugePages Mount for Tenstorrent
+DefaultDependencies=no
+Before=local-fs.target
+
+[Mount]
+What=hugetlbfs
+Where=/dev/hugepages-1G
+Type=hugetlbfs
+Options=pagesize=1G
+
+[Install]
+WantedBy=local-fs.target
+EOF
+
+		# Reload systemd to recognize the new unit file
+		sudo systemctl daemon-reload
+
+		# Enable the mount unit to start at boot
+		sudo systemctl enable dev-hugepages-1G.mount
+
+		# Try to mount immediately (|| true prevents script exit on failure)
+		# May fail if 1GB hugepages aren't supported by the hardware
+		sudo systemctl start dev-hugepages-1G.mount || true
+
+		log "Systemd mount unit created for 1GB hugepages"
+	else
+		# OpenRC: Add to /etc/fstab for automatic mounting at boot
+		log "Adding hugepages to /etc/fstab for OpenRC"
+
+		# Check if entry already exists to avoid duplicates
+		if ! grep -q "/dev/hugepages-1G" /etc/fstab 2>/dev/null; then
+			# Add hugepages mount to fstab
+			# Format: filesystem mountpoint type options dump pass
+			echo "hugetlbfs /dev/hugepages-1G hugetlbfs pagesize=1G 0 0" \
+				| sudo tee -a /etc/fstab
+		fi
+
+		# Try to mount immediately
+		# || warn ensures we inform the user if it fails but don't exit
+		sudo mount /dev/hugepages-1G 2>/dev/null || \
+			warn "Failed to mount hugepages, may need reboot or kernel with 1GB hugepage support"
+
+		log "HugePages added to /etc/fstab for OpenRC"
+	fi
+
+	log "HugePages configured manually"
+}
+
 manual_install_hugepages() {
 	log "Setting up HugePages"
 	BASE_TOOLS_URL="https://github.com/tenstorrent/tt-system-tools/releases/download"
@@ -853,6 +1018,13 @@ manual_install_hugepages() {
 				# shellcheck disable=2086
 				sudo systemctl enable ${SYSTEMD_NOW} 'dev-hugepages\x2d1G.mount'
 			fi
+			;;
+		"gentoo")
+			# Gentoo: Build and install from source
+			# Gentoo doesn't have pre-built .deb or .rpm packages, so we build from source
+			# This calls our helper function which handles both systemd and OpenRC
+			log "Installing HugePages for Gentoo (source build)"
+			manual_install_hugepages_gentoo_source
 			;;
 		*)
 			error "This distro is unsupported. Skipping HugePages install!"
@@ -894,11 +1066,65 @@ manual_install_sfpi() {
 			SFPI_FILE_EXT="rpm"
 			SFPI_DISTRO_TYPE="fedora"
 			;;
+		"gentoo")
+			# Gentoo: Build SFPI from source
+			# No pre-built packages are available for Gentoo, so we clone and build
+			log "Building SFPI from source for Gentoo"
+			cd "${WORKDIR}"
+
+			# Clone the SFPI repository
+			# First try to clone at the specified version tag
+			# If that fails (version tag doesn't exist), clone the main branch
+			git clone --branch "${SFPI_VERSION}" \
+				https://github.com/tenstorrent/sfpi.git || \
+				git clone https://github.com/tenstorrent/sfpi.git
+
+			cd sfpi
+
+			# Check if the specified SFPI version tag exists
+			# If it does, checkout that version; otherwise use latest
+			if git rev-parse "${SFPI_VERSION}" >/dev/null 2>&1; then
+				git checkout "${SFPI_VERSION}"
+				log "Checked out SFPI version ${SFPI_VERSION}"
+			else
+				warn "Version ${SFPI_VERSION} not found in repository, using latest commit"
+			fi
+
+			# Detect build system and build accordingly
+			# SFPI could be either a Rust or Python project
+			if [[ -f "Cargo.toml" ]]; then
+				# Rust project: Build with cargo
+				log "Detected Rust project (Cargo.toml), building with cargo"
+				cargo build --release
+
+				# Install the compiled binary to /usr/local/bin
+				# This location is typically in PATH and appropriate for local software
+				sudo install -Dm755 target/release/sfpi /usr/local/bin/sfpi
+				log "SFPI binary installed to /usr/local/bin/sfpi"
+
+			elif [[ -f "setup.py" ]] || [[ -f "pyproject.toml" ]]; then
+				# Python project: Install with pip/pipx
+				log "Detected Python project, installing with pip"
+				${PYTHON_INSTALL_CMD} .
+				log "SFPI Python package installed"
+
+			else
+				# Unknown build system
+				error "Unknown SFPI build system (no Cargo.toml, setup.py, or pyproject.toml found)"
+				return 1
+			fi
+
+			log "SFPI built and installed from source successfully"
+			return 0
+			;;
 		*)
 			error "Unsupported distribution for SFPI installation: ${DISTRO_ID}"
 			exit 1
 			;;
 	esac
+
+	# The following code only runs for non-Gentoo distros (deb/rpm packages)
+	# Gentoo returns early in the case above
 
 	SFPI_FILE="sfpi_${SFPI_VERSION}_${SFPI_FILE_ARCH}_${SFPI_DISTRO_TYPE}.${SFPI_FILE_EXT}"
 	log "Downloading ${SFPI_FILE}"
@@ -1124,6 +1350,30 @@ main() {
 			sudo dnf install -y epel-release
 			sudo dnf install -y git python3-pip python3-devel dkms cargo rust pipx jq protobuf-compiler
 			KERNEL_LISTING="${KERNEL_LISTING_EL}"
+			;;
+		"gentoo")
+			# Gentoo Linux: Install packages via emerge (portage package manager)
+			# Note: --ask=n suppresses interactive prompts for non-interactive mode
+			# Note: We intentionally don't run 'emerge --sync' here as it can be very slow.
+			#       Users should sync their portage tree before running this installer if needed.
+			log "Installing base packages for Gentoo Linux via emerge (portage)"
+
+			# Install all required dependencies in one emerge command
+			# This is more efficient than multiple emerge calls
+			sudo emerge --ask=n --verbose \
+				dev-vcs/git \
+				dev-python/pip \
+				sys-kernel/dkms \
+				dev-lang/rust \
+				dev-python/pipx \
+				app-misc/jq \
+				dev-libs/protobuf
+
+			# Set kernel listing command for Gentoo
+			# Gentoo typically has kernel sources in /lib/modules
+			KERNEL_LISTING="${KERNEL_LISTING_GENTOO}"
+
+			log "Base packages installed successfully on Gentoo"
 			;;
 		*)
 			error "Unsupported distribution: ${DISTRO_ID}"

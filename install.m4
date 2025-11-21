@@ -1145,85 +1145,156 @@ manual_install_sfpi() {
 			# Clone the SFPI repository
 			# First try to clone at the specified version tag
 			# If that fails (version tag doesn't exist), clone the main branch
+			# Note: We DON'T use 2>/dev/null here - we want to see git's output!
+			# Git warnings and progress messages are normal and shouldn't be hidden.
 			log "Cloning SFPI repository (version ${SFPI_VERSION})..."
-			if ! git clone --branch "${SFPI_VERSION}" \
-				https://github.com/tenstorrent/sfpi.git 2>/dev/null; then
-				warn "Failed to clone at version ${SFPI_VERSION}, trying main branch..."
-				if ! git clone https://github.com/tenstorrent/sfpi.git 2>/dev/null; then
+			log "Repository: https://github.com/tenstorrent/sfpi.git"
+
+			# Try version-specific tag first
+			if git clone --branch "${SFPI_VERSION}" \
+				https://github.com/tenstorrent/sfpi.git 2>&1; then
+				log "Successfully cloned SFPI at version ${SFPI_VERSION}"
+			else
+				# Tag doesn't exist, try default branch
+				warn "Tag ${SFPI_VERSION} not found, trying default branch..."
+				if git clone https://github.com/tenstorrent/sfpi.git 2>&1; then
+					log "Successfully cloned SFPI from default branch"
+				else
 					error "Failed to clone SFPI repository from GitHub"
-					error "Network issue or repository unavailable?"
-					warn "Skipping SFPI installation - you can install it manually later"
-					warn "Visit: https://github.com/tenstorrent/sfpi"
+					error "This might be a network issue or the repository may be unavailable"
+					warn "Skipping SFPI installation - you can install it manually later with:"
+					warn "  git clone https://github.com/tenstorrent/sfpi.git"
+					warn "  cd sfpi && cargo build --release"
 					return 0  # Don't fail the entire installation
 				fi
 			fi
 
+			# Verify the clone succeeded by checking for directory
 			if [[ ! -d "sfpi" ]]; then
-				error "SFPI directory not found after clone"
+				error "SFPI directory not found after git clone"
+				error "This is unexpected - git clone reported success but directory is missing"
+				warn "Current directory: $(pwd)"
+				warn "Contents:"
+				ls -la
 				warn "Skipping SFPI installation"
 				return 0
 			fi
 
 			cd sfpi
+			log "Entered SFPI directory: $(pwd)"
 
-			# Check if the specified SFPI version tag exists
-			# If it does, checkout that version; otherwise use latest
+			# Try to checkout specific version if we cloned from default branch
+			# This is belt-and-suspenders since we tried --branch first
 			if git rev-parse "${SFPI_VERSION}" >/dev/null 2>&1; then
-				git checkout "${SFPI_VERSION}"
+				log "Checking out SFPI version ${SFPI_VERSION}"
+				git checkout "${SFPI_VERSION}" 2>&1
 				log "Checked out SFPI version ${SFPI_VERSION}"
 			else
-				warn "Version ${SFPI_VERSION} not found in repository, using latest commit"
+				warn "Version tag ${SFPI_VERSION} not found in repository"
+				warn "Using latest commit from cloned branch"
+				git log -1 --oneline  # Show what we're building
 			fi
 
 			# Detect build system and build accordingly
 			# SFPI could be either a Rust or Python project
+			log "Detecting SFPI build system..."
+			log "Directory contents:"
+			ls -la | head -20  # Show first 20 files for debugging
+
 			if [[ -f "Cargo.toml" ]]; then
 				# Rust project: Build with cargo
-				log "Detected Rust project (Cargo.toml), building with cargo"
-				log "This may take a few minutes on first build..."
+				log "Detected Rust project (Cargo.toml found)"
+				log "Building SFPI with cargo (this may take a few minutes)..."
+				log "Note: Cargo warnings are normal and don't indicate failure"
 
-				if ! cargo build --release; then
-					error "Cargo build failed for SFPI"
-					warn "Skipping SFPI installation - you can build it manually later"
-					warn "Directory: ${WORKDIR}/sfpi"
+				# Build with cargo - show all output
+				# Don't hide stderr! Cargo warnings are informational, not errors
+				log "Running: cargo build --release"
+				cargo build --release
+				BUILD_EXIT_CODE=$?
+
+				if [[ ${BUILD_EXIT_CODE} -ne 0 ]]; then
+					error "Cargo build exited with code ${BUILD_EXIT_CODE}"
+					error "This indicates a real build failure (not just warnings)"
+					warn "You can try building manually:"
+					warn "  cd ${WORKDIR}/sfpi"
+					warn "  cargo build --release"
 					return 0
 				fi
 
+				log "Cargo build completed successfully"
+
 				# Check if binary was actually built
+				# This is the real test - did we get an executable?
 				if [[ ! -f "target/release/sfpi" ]]; then
-					error "SFPI binary not found after build"
-					warn "Skipping SFPI installation"
+					error "SFPI binary not found at target/release/sfpi after successful build"
+					error "This is unexpected - cargo reported success but binary is missing"
+					warn "Checking what's in target/release/:"
+					ls -la target/release/ | head -20
+					warn "You can investigate manually at: ${WORKDIR}/sfpi"
 					return 0
+				fi
+
+				log "SFPI binary found at target/release/sfpi"
+
+				# Verify it's executable
+				if [[ ! -x "target/release/sfpi" ]]; then
+					warn "SFPI binary exists but is not executable, fixing permissions..."
+					chmod +x target/release/sfpi
 				fi
 
 				# Install the compiled binary to /usr/local/bin
 				# This location is typically in PATH and appropriate for local software
+				log "Installing SFPI binary to /usr/local/bin/sfpi"
 				sudo install -Dm755 target/release/sfpi /usr/local/bin/sfpi
-				log "SFPI binary installed to /usr/local/bin/sfpi"
+
+				# Verify installation
+				if command -v sfpi &> /dev/null; then
+					log "SFPI binary installed successfully to /usr/local/bin/sfpi"
+					sfpi --version || log "SFPI installed (version check not available)"
+				else
+					warn "SFPI binary copied but not found in PATH"
+					warn "You may need to add /usr/local/bin to your PATH"
+				fi
 
 			elif [[ -f "setup.py" ]] || [[ -f "pyproject.toml" ]]; then
 				# Python project: Install with pip/pipx
-				log "Detected Python project, installing with pip"
+				log "Detected Python project (found setup.py or pyproject.toml)"
+				log "Installing SFPI with: ${PYTHON_INSTALL_CMD} ."
 
-				if ! ${PYTHON_INSTALL_CMD} . ; then
-					error "Python package installation failed for SFPI"
-					warn "Skipping SFPI installation - you can install it manually later"
-					warn "Directory: ${WORKDIR}/sfpi"
+				# Run Python install - show output
+				${PYTHON_INSTALL_CMD} .
+				INSTALL_EXIT_CODE=$?
+
+				if [[ ${INSTALL_EXIT_CODE} -ne 0 ]]; then
+					error "Python package installation exited with code ${INSTALL_EXIT_CODE}"
+					warn "You can try installing manually:"
+					warn "  cd ${WORKDIR}/sfpi"
+					warn "  pip install ."
 					return 0
 				fi
 
-				log "SFPI Python package installed"
+				log "SFPI Python package installed successfully"
+
+				# Try to verify installation
+				if command -v sfpi &> /dev/null; then
+					log "SFPI command available in PATH"
+					sfpi --version || log "SFPI installed (version check not available)"
+				fi
 
 			else
 				# Unknown build system
-				error "Unknown SFPI build system (no Cargo.toml, setup.py, or pyproject.toml found)"
-				warn "Contents of directory:"
+				error "Unknown SFPI build system"
+				error "Expected to find: Cargo.toml (Rust) or setup.py/pyproject.toml (Python)"
+				error "Found neither - this might be a new build system or repository structure"
+				warn "Directory contents:"
 				ls -la
-				warn "Skipping SFPI installation - manual installation may be needed"
+				warn "If SFPI uses a different build system, please report this issue"
+				warn "You can try manual installation at: ${WORKDIR}/sfpi"
 				return 0  # Don't fail entire installation
 			fi
 
-			log "SFPI built and installed from source successfully"
+			log "SFPI built and installed from source successfully!"
 			return 0
 			;;
 		*)

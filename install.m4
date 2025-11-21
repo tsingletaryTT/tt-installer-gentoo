@@ -1138,15 +1138,31 @@ manual_install_sfpi() {
 		"gentoo")
 			# Gentoo: Build SFPI from source
 			# No pre-built packages are available for Gentoo, so we clone and build
+			# SFPI (SFP Interface) is used for managing SFP modules on Tenstorrent hardware
 			log "Building SFPI from source for Gentoo"
 			cd "${WORKDIR}"
 
 			# Clone the SFPI repository
 			# First try to clone at the specified version tag
 			# If that fails (version tag doesn't exist), clone the main branch
-			git clone --branch "${SFPI_VERSION}" \
-				https://github.com/tenstorrent/sfpi.git || \
-				git clone https://github.com/tenstorrent/sfpi.git
+			log "Cloning SFPI repository (version ${SFPI_VERSION})..."
+			if ! git clone --branch "${SFPI_VERSION}" \
+				https://github.com/tenstorrent/sfpi.git 2>/dev/null; then
+				warn "Failed to clone at version ${SFPI_VERSION}, trying main branch..."
+				if ! git clone https://github.com/tenstorrent/sfpi.git 2>/dev/null; then
+					error "Failed to clone SFPI repository from GitHub"
+					error "Network issue or repository unavailable?"
+					warn "Skipping SFPI installation - you can install it manually later"
+					warn "Visit: https://github.com/tenstorrent/sfpi"
+					return 0  # Don't fail the entire installation
+				fi
+			fi
+
+			if [[ ! -d "sfpi" ]]; then
+				error "SFPI directory not found after clone"
+				warn "Skipping SFPI installation"
+				return 0
+			fi
 
 			cd sfpi
 
@@ -1164,7 +1180,21 @@ manual_install_sfpi() {
 			if [[ -f "Cargo.toml" ]]; then
 				# Rust project: Build with cargo
 				log "Detected Rust project (Cargo.toml), building with cargo"
-				cargo build --release
+				log "This may take a few minutes on first build..."
+
+				if ! cargo build --release; then
+					error "Cargo build failed for SFPI"
+					warn "Skipping SFPI installation - you can build it manually later"
+					warn "Directory: ${WORKDIR}/sfpi"
+					return 0
+				fi
+
+				# Check if binary was actually built
+				if [[ ! -f "target/release/sfpi" ]]; then
+					error "SFPI binary not found after build"
+					warn "Skipping SFPI installation"
+					return 0
+				fi
 
 				# Install the compiled binary to /usr/local/bin
 				# This location is typically in PATH and appropriate for local software
@@ -1174,13 +1204,23 @@ manual_install_sfpi() {
 			elif [[ -f "setup.py" ]] || [[ -f "pyproject.toml" ]]; then
 				# Python project: Install with pip/pipx
 				log "Detected Python project, installing with pip"
-				${PYTHON_INSTALL_CMD} .
+
+				if ! ${PYTHON_INSTALL_CMD} . ; then
+					error "Python package installation failed for SFPI"
+					warn "Skipping SFPI installation - you can install it manually later"
+					warn "Directory: ${WORKDIR}/sfpi"
+					return 0
+				fi
+
 				log "SFPI Python package installed"
 
 			else
 				# Unknown build system
 				error "Unknown SFPI build system (no Cargo.toml, setup.py, or pyproject.toml found)"
-				return 1
+				warn "Contents of directory:"
+				ls -la
+				warn "Skipping SFPI installation - manual installation may be needed"
+				return 0  # Don't fail entire installation
 			fi
 
 			log "SFPI built and installed from source successfully"
@@ -1440,10 +1480,15 @@ main() {
 			#   echo "category/package ~amd64" | sudo tee -a /etc/portage/package.accept_keywords/tenstorrent
 
 			# Install all required dependencies in one emerge command
-			# This is more efficient than multiple emerge calls
+			# --noreplace (-n): Don't reinstall packages that are already installed
+			#   This prevents Rust and other large packages from being rebuilt unnecessarily
+			#   on repeated installer runs. Saves significant time!
 			# --autounmask-continue: automatically handle keyword masking if needed
 			# --verbose: show detailed output of what's being installed
-			sudo emerge --ask=n --verbose --autounmask-continue \
+			# Note: Using --noreplace is safe here because we're installing core dependencies
+			#       If they need updating, user can run 'emerge -uDN @world' separately.
+			log "Checking and installing missing base packages (skipping already-installed packages)"
+			sudo emerge --ask=n --noreplace --verbose --autounmask-continue \
 				dev-vcs/git \
 				dev-python/pip \
 				sys-kernel/dkms \
@@ -1462,7 +1507,7 @@ main() {
 			# Gentoo typically has kernel sources in /lib/modules
 			KERNEL_LISTING="${KERNEL_LISTING_GENTOO}"
 
-			log "Base packages installed successfully on Gentoo"
+			log "Base packages ready on Gentoo"
 			;;
 		*)
 			error "Unsupported distribution: ${DISTRO_ID}"

@@ -1261,6 +1261,91 @@ manual_install_sfpi() {
 	esac
 }
 
+# Install tt-metal (TT-Metalium source code) to ~/tt-metal
+# This is the core TT-Metalium framework for development
+# Standard TT devXP requires this in the user's home directory
+install_tt_metal() {
+	log "Installing tt-metal source code to ~/tt-metal"
+
+	# Determine the actual user (not root) even when using sudo
+	# This is critical because we want ~/tt-metal owned by the user, not root
+	# SUDO_USER is set when using sudo, otherwise use current USER
+	ACTUAL_USER="${SUDO_USER:-$USER}"
+	ACTUAL_HOME=$(eval echo "~${ACTUAL_USER}")
+
+	log "Installing for user: ${ACTUAL_USER}"
+	log "Home directory: ${ACTUAL_HOME}"
+
+	TT_METAL_DIR="${ACTUAL_HOME}/tt-metal"
+
+	# Check if tt-metal already exists
+	if [[ -d "${TT_METAL_DIR}" ]]; then
+		warn "tt-metal directory already exists at ${TT_METAL_DIR}"
+
+		# Check if it's a git repository
+		if [[ -d "${TT_METAL_DIR}/.git" ]]; then
+			log "Existing git repository found, updating..."
+			# Run git operations as the actual user, not root
+			if [[ -n "${SUDO_USER}" ]]; then
+				sudo -u "${ACTUAL_USER}" bash -c "cd ${TT_METAL_DIR} && git fetch --all"
+				sudo -u "${ACTUAL_USER}" bash -c "cd ${TT_METAL_DIR} && git pull"
+			else
+				cd "${TT_METAL_DIR}"
+				git fetch --all
+				git pull
+			fi
+			log "tt-metal updated from git"
+		else
+			warn "Existing tt-metal directory is not a git repository"
+			warn "Skipping tt-metal installation to avoid overwriting"
+			warn "Remove ${TT_METAL_DIR} manually if you want to reinstall"
+			return 0
+		fi
+	else
+		# Clone tt-metal as the actual user, not root
+		log "Cloning tt-metal from GitHub (this may take a few minutes)..."
+
+		# Run git clone as the actual user to ensure correct ownership
+		if [[ -n "${SUDO_USER}" ]]; then
+			# Using sudo, run as the actual user
+			sudo -u "${ACTUAL_USER}" git clone https://github.com/tenstorrent/tt-metal.git "${TT_METAL_DIR}" || {
+				error "Failed to clone tt-metal repository"
+				warn "Skipping tt-metal installation"
+				warn "You can manually clone it later with:"
+				warn "  git clone https://github.com/tenstorrent/tt-metal.git ~/tt-metal"
+				return 0
+			}
+		else
+			# Not using sudo, just clone normally
+			git clone https://github.com/tenstorrent/tt-metal.git "${TT_METAL_DIR}" || {
+				error "Failed to clone tt-metal repository"
+				warn "Skipping tt-metal installation"
+				return 0
+			}
+		fi
+
+		log "tt-metal cloned successfully to ${TT_METAL_DIR}"
+	fi
+
+	# Verify ownership is correct (should be owned by actual user, not root)
+	OWNER=$(stat -c '%U' "${TT_METAL_DIR}" 2>/dev/null || stat -f '%Su' "${TT_METAL_DIR}" 2>/dev/null)
+	if [[ "${OWNER}" != "${ACTUAL_USER}" ]]; then
+		warn "tt-metal directory owner is ${OWNER}, expected ${ACTUAL_USER}"
+		warn "Fixing ownership..."
+		sudo chown -R "${ACTUAL_USER}:${ACTUAL_USER}" "${TT_METAL_DIR}"
+	fi
+
+	log "tt-metal is ready at ${TT_METAL_DIR}"
+	log "To build tt-metal, see: ${TT_METAL_DIR}/README.md"
+	log "Standard TT development workflow uses this directory"
+	log ""
+	log "Quick start:"
+	log "  cd ~/tt-metal"
+	log "  # Follow build instructions in README.md"
+
+	return 0
+}
+
 install_tt_repos () {
 	log "Installing TT repositories to your distribution package manager"
 	case "${DISTRO_ID}" in
@@ -1684,6 +1769,11 @@ main() {
 	# Install TT-SMI
 	log "Installing System Management Interface"
 	${PYTHON_INSTALL_CMD} git+https://github.com/tenstorrent/tt-smi@"${SMI_VERSION}"
+
+	# Install tt-metal source code to ~/tt-metal
+	# This is standard TT devXP - provides the full source tree for development
+	log "Installing tt-metal source code"
+	install_tt_metal
 
 	# Install Podman if requested
 	if [[ "${_arg_install_podman}" = "off" ]]; then

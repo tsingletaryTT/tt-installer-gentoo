@@ -6,6 +6,7 @@ This document describes where all Tenstorrent software components are installed 
 
 | Component | Location | Type | Notes |
 |-----------|----------|------|-------|
+| **tt-metal source** | `~/tt-metal/` | Git clone | **Main development directory** |
 | **tt-kmd** | `/lib/modules/$(uname -r)/updates/dkms/` | Kernel module | Via DKMS |
 | **tt-smi** | Python site-packages or `~/.local/bin/` | Python CLI tool | Depends on python choice |
 | **tt-flash** | Python site-packages or `~/.local/bin/` | Python CLI tool | Depends on python choice |
@@ -23,7 +24,77 @@ This document describes where all Tenstorrent software components are installed 
 
 ## Detailed Component Locations
 
-### 1. Kernel Module (tt-kmd)
+### 1. TT-Metal Source Code (~/tt-metal)
+
+**Installation Method**: Git clone to user's home directory
+
+**Location**:
+```
+~/tt-metal/                            # Main development directory
+~/tt-metal/.git/                       # Git repository
+~/tt-metal/tt_metal/                   # Core framework code
+~/tt-metal/models/                     # Model implementations
+~/tt-metal/tests/                      # Test suites
+~/tt-metal/build/                      # Build artifacts (after building)
+```
+
+**What is tt-metal?**
+
+tt-metal (TT-Metalium) is Tenstorrent's complete AI framework. This is the **primary development directory** for working with Tenstorrent hardware. It contains:
+- TT-NN (TensorT Neural Network) framework
+- Low-level hardware APIs
+- Model implementations
+- Examples and tutorials
+- Build system and tooling
+
+**Ownership**:
+- **Critical**: Installed as the actual user (not root), even when using sudo
+- This ensures proper permissions for development work
+- Automatically updates if already exists (git pull)
+
+**How to verify**:
+```bash
+# Check if installed
+ls -la ~/tt-metal/
+
+# Check ownership (should be your user, not root)
+ls -ld ~/tt-metal/
+
+# Check git status
+cd ~/tt-metal
+git status
+git log -1  # See latest commit
+
+# Check which branch
+git branch
+```
+
+**Working with tt-metal**:
+```bash
+# Navigate to tt-metal
+cd ~/tt-metal
+
+# Pull latest changes
+git pull
+
+# Build tt-metal (see README.md for full instructions)
+# Build process depends on your hardware and configuration
+
+# Run examples
+cd ~/tt-metal/models/demos/
+# Follow specific model README instructions
+```
+
+**Why ~/tt-metal?**
+
+This location is standard across Tenstorrent development:
+- Standard TT devXP (developer experience)
+- Matches internal and external documentation
+- Easy to find and navigate
+- Proper ownership for development
+- Not buried in system directories
+
+### 2. Kernel Module (tt-kmd)
 
 **Installation Method**: DKMS (Dynamic Kernel Module Support)
 
@@ -564,33 +635,64 @@ sudo reboot
 
 ### Where is tt-metal itself installed?
 
-**tt-metal is NOT installed on your system directly**. Instead:
-- The **tt-metalium container** contains a complete tt-metal build
-- When you run `tt-metalium`, you're running inside a container that has tt-metal pre-installed
+**tt-metal IS installed directly at `~/tt-metal/`** by the installer!
+
+- The **source code** is cloned to `~/tt-metal/` during installation
+- This is the **primary development directory** for working with Tenstorrent hardware
+- Owned by your user (not root) for proper development permissions
+- Automatically updated (git pull) if you run the installer again
+
+Additionally, there's also:
+- The **tt-metalium container** which contains a complete pre-built tt-metal
+- When you run `tt-metalium`, you're running inside a container
 - The container lives in `~/.local/share/containers/storage/`
-- Your code/data lives in your normal home directory and is mounted into the container
+- Useful for quick testing without building from source
 
 ### How do I access tt-metal source code?
 
-The tt-metalium container includes the source, but if you want to develop:
+**It's already installed!**
 
 ```bash
-# Clone tt-metal repository
-git clone https://github.com/tenstorrent/tt-metal.git
-cd tt-metal
+# Navigate to tt-metal
+cd ~/tt-metal
 
-# Use the container to build
-tt-metalium "make build"
+# Check status
+git status
+git log -1
+
+# Pull latest changes
+git pull
+
+# Build tt-metal (see README.md for instructions)
+# Follow the build process for your hardware
 ```
 
-### Can I install tt-metal directly (not in container)?
+### Should I use ~/tt-metal or the container?
 
-Yes, but it's not handled by this installer. You would:
-1. Clone https://github.com/tenstorrent/tt-metal
-2. Install all build dependencies
-3. Build from source
+**Use both, depending on your needs:**
 
-The container approach is recommended for ease of use.
+**~/tt-metal (source installation)** - For development:
+- Modify source code
+- Build custom versions
+- Develop new features
+- Debug issues
+- Follow latest development
+
+**tt-metalium container** - For quick usage:
+- Pre-built, ready to use
+- No build time required
+- Isolated environment
+- Quick testing and demos
+
+**Typical workflow:**
+```bash
+# Develop in ~/tt-metal
+cd ~/tt-metal
+# Make changes, build, test
+
+# Or use pre-built container for quick tests
+tt-metalium python3 my_script.py
+```
 
 ### How much disk space do containers use?
 

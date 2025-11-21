@@ -1269,8 +1269,22 @@ install_tt_metal() {
 
 	# Determine the actual user (not root) even when using sudo
 	# This is critical because we want ~/tt-metal owned by the user, not root
-	# SUDO_USER is set when using sudo, otherwise use current USER
-	ACTUAL_USER="${SUDO_USER:-$USER}"
+	# Handle SUDO_USER carefully since it may not be set (when not using sudo)
+	# and we have 'set -u' enabled which treats unset variables as errors
+	local ACTUAL_USER
+	local ACTUAL_HOME
+	local USING_SUDO=false
+
+	# Check if SUDO_USER is set (happens when running with sudo)
+	# Use parameter expansion with :+ to check if variable is set and non-empty
+	if [[ "${SUDO_USER:+x}" == "x" ]]; then
+		ACTUAL_USER="${SUDO_USER}"
+		USING_SUDO=true
+	else
+		ACTUAL_USER="${USER}"
+		USING_SUDO=false
+	fi
+
 	ACTUAL_HOME=$(eval echo "~${ACTUAL_USER}")
 
 	log "Installing for user: ${ACTUAL_USER}"
@@ -1286,7 +1300,7 @@ install_tt_metal() {
 		if [[ -d "${TT_METAL_DIR}/.git" ]]; then
 			log "Existing git repository found, updating..."
 			# Run git operations as the actual user, not root
-			if [[ -n "${SUDO_USER}" ]]; then
+			if [[ "${USING_SUDO}" == "true" ]]; then
 				sudo -u "${ACTUAL_USER}" bash -c "cd ${TT_METAL_DIR} && git fetch --all"
 				sudo -u "${ACTUAL_USER}" bash -c "cd ${TT_METAL_DIR} && git pull"
 			else
@@ -1306,7 +1320,7 @@ install_tt_metal() {
 		log "Cloning tt-metal from GitHub (this may take a few minutes)..."
 
 		# Run git clone as the actual user to ensure correct ownership
-		if [[ -n "${SUDO_USER}" ]]; then
+		if [[ "${USING_SUDO}" == "true" ]]; then
 			# Using sudo, run as the actual user
 			sudo -u "${ACTUAL_USER}" git clone https://github.com/tenstorrent/tt-metal.git "${TT_METAL_DIR}" || {
 				error "Failed to clone tt-metal repository"
